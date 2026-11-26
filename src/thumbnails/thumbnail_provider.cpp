@@ -108,6 +108,37 @@ namespace {
       int source, int side, GCancellable* cancel, const std::filesystem::path& output, luciole::ThumbnailPurpose purpose
   ) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    // An embedded cover (attached picture, e.g. yt-dlp --embed-thumbnail) is the file's intended preview, so try
+    // it before decoding frames. Files without one fail the stream map and fall through to the frame loop.
+    {
+      std::vector<std::string> arguments{"ffmpeg",   "-nostdin",
+                                         "-v",       "error",
+                                         "-xerror",  "-threads",
+                                         "1",        "-filter_threads",
+                                         "1",        "-protocol_whitelist",
+                                         "file,pipe"};
+      arguments.insert(
+          arguments.end(),
+          {"-i", "/proc/self/fd/3", "-map", "0:disp:attached_pic", "-frames:v", "1", "-an", "-sn", "-threads", "1",
+           "-vf",
+           "scale=" + std::to_string(side) + ':' + std::to_string(side) + ":force_original_aspect_ratio=decrease", "-y",
+           output.native()}
+      );
+      (void)::unlink(output.c_str());
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+      const auto result =
+          luciole::runProviderProcess(std::move(arguments), source, cancel, 8U * 1024U * 1024U, 0, -1, remaining);
+      if (result) {
+        const auto bytes = luciole::readThumbnailFile(output, 8U * 1024U * 1024U);
+        if (bytes) {
+          if (auto cover = luciole::readThumbnailPng(*bytes, side)) {
+            // A cover is already the intended artwork: skip the filmstrip border added to decoded frames.
+            return std::move(cover->image);
+          }
+        }
+      }
+    }
     const auto duration = videoDuration(source, output.parent_path(), cancel);
     const std::vector<double> positions =
         duration && *duration >= 1 ? std::vector{*duration * 0.1, *duration / 3, 0.0} : std::vector{0.0};
