@@ -607,14 +607,20 @@ namespace {
          "-map",
          "0:v",
          "-map",
+         "0:v",
+         "-map",
          "1:v",
          "-c:v:0",
          "png",
          "-disposition:v:0",
          "attached_pic",
          "-c:v:1",
-         "copy",
+         "png",
          "-disposition:v:1",
+         "attached_pic",
+         "-c:v:2",
+         "copy",
+         "-disposition:v:2",
          "default",
          "-threads",
          "1",
@@ -768,7 +774,8 @@ namespace {
     still = render(intraVideo, "video/x-msvideo");
     TEST_CHECK(still && still->width == 128 && still->height == 64 && still->rgba[2] > 220);
     still = render(coveredVideo, "video/mp4");
-    TEST_CHECK(still && still->width == 128 && still->height == 64 && still->rgba[2] > 220 && still->rgba[0] < 30);
+    // Two embedded covers (as from mkvmerge cover + small_cover): the first wins over the blue video frame.
+    TEST_CHECK(still && still->width == 128 && still->height == 64 && still->rgba[0] > 200 && still->rgba[2] < 100);
     still = render(document, "application/pdf");
     TEST_CHECK(still && still->width == 128 && still->height == 64 && still->rgba.front() > 220);
     still = render(audio, "audio/mpeg");

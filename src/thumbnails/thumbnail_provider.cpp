@@ -76,25 +76,36 @@ namespace {
     logDebug("[thumbnail] filmstrip unavailable; keeping selected video frame");
     return frame;
   }
-  std::optional<double> videoDuration(int source, const std::filesystem::path& directory, GCancellable* cancel) {
-    const auto path = directory / "duration";
+  struct VideoProbe {
+    std::optional<double> duration;
+    bool cover = false;
+  };
+  VideoProbe probeVideo(int source, const std::filesystem::path& directory, GCancellable* cancel) {
+    const auto path = directory / "probe";
     const luciole::Fd output(::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
     if (!output.valid()
         || !luciole::runProviderProcess(
-            {"ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=duration", "-of",
-             "default=noprint_wrappers=1:nokey=1", "/proc/self/fd/3"},
+            {"ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries",
+             "format=duration:stream_disposition=attached_pic", "-of", "default=noprint_wrappers=1", "/proc/self/fd/3"},
             source, cancel, 4096, 1, output.get(), std::chrono::seconds(2)
         )) {
-      return std::nullopt;
+      return {};
     }
     const auto bytes = luciole::readThumbnailFile(path, 4096);
-    if (!bytes || bytes->empty()) {
-      return std::nullopt;
+    if (!bytes) {
+      return {};
     }
-    const auto* begin = reinterpret_cast<const char*>(bytes->data());
-    double duration = 0;
-    const auto parsed = std::from_chars(begin, begin + bytes->size(), duration);
-    return parsed.ec == std::errc{} && std::isfinite(duration) && duration > 0 ? std::optional(duration) : std::nullopt;
+    const std::string_view text(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+    VideoProbe probe{.duration = std::nullopt, .cover = text.contains("DISPOSITION:attached_pic=1")};
+    if (const auto key = text.find("duration="); key != std::string_view::npos) {
+      const auto* begin = text.data() + key + 9;
+      double duration = 0;
+      const auto parsed = std::from_chars(begin, text.data() + text.size(), duration);
+      if (parsed.ec == std::errc{} && std::isfinite(duration) && duration > 0) {
+        probe.duration = duration;
+      }
+    }
+    return probe;
   }
   bool darkFrame(const LoadedImageFile& image) {
     std::size_t dark = 0;
@@ -108,9 +119,10 @@ namespace {
       int source, int side, GCancellable* cancel, const std::filesystem::path& output, luciole::ThumbnailPurpose purpose
   ) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    // An embedded cover (attached picture, e.g. yt-dlp --embed-thumbnail) is the file's intended preview, so try
-    // it before decoding frames. Files without one fail the stream map and fall through to the frame loop.
-    {
+    const auto probe = probeVideo(source, output.parent_path(), cancel);
+    // An embedded cover (attached picture, e.g. yt-dlp --embed-thumbnail) is the file's intended preview, so prefer
+    // it to decoded frames. Files without a usable cover fall through to the frame loop.
+    if (probe.cover) {
       std::vector<std::string> arguments{"ffmpeg",   "-nostdin",
                                          "-v",       "error",
                                          "-xerror",  "-threads",
@@ -119,7 +131,7 @@ namespace {
                                          "file,pipe"};
       arguments.insert(
           arguments.end(),
-          {"-i", "/proc/self/fd/3", "-map", "0:disp:attached_pic", "-frames:v", "1", "-an", "-sn", "-threads", "1",
+          {"-i", "/proc/self/fd/3", "-map", "0:disp:attached_pic:0", "-frames:v", "1", "-an", "-sn", "-threads", "1",
            "-vf",
            "scale=" + std::to_string(side) + ':' + std::to_string(side) + ":force_original_aspect_ratio=decrease", "-y",
            output.native()}
@@ -139,7 +151,7 @@ namespace {
         }
       }
     }
-    const auto duration = videoDuration(source, output.parent_path(), cancel);
+    const auto& duration = probe.duration;
     const std::vector<double> positions =
         duration && *duration >= 1 ? std::vector{*duration * 0.1, *duration / 3, 0.0} : std::vector{0.0};
     std::optional<LoadedImageFile> dark;
